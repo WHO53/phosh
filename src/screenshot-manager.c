@@ -253,16 +253,14 @@ on_opaque_timeout (PhoshScreenshotManager *self)
 {
   GdkDisplay *display = gdk_display_get_default ();
   GtkClipboard *clipboard;
-
   if (!display) {
     g_critical ("Couldn't get GDK display");
     goto out;
   }
-
   clipboard = gtk_clipboard_get_for_display (display, GDK_SELECTION_CLIPBOARD);
   gtk_clipboard_set_image (clipboard, self->for_clipboard);
   g_debug ("Updated clipboard");
-  screenshot_done (self, TRUE);
+  // Don't call screenshot_done() here, as it will be called after saving to file
 
  out:
   g_clear_object (&self->for_clipboard);
@@ -402,22 +400,34 @@ submit_screenshot (PhoshScreenshotManager *self)
                           0);
   }
 
-  if (self->frames->filename) {
-    file = g_file_new_for_path (self->frames->filename);
-    stream = g_file_create (file, G_FILE_CREATE_NONE, NULL, &err);
-    if (!stream) {
-      g_warning ("Failed to save screenshot %s: %s", self->frames->filename, err->message);
-      screenshot_done (self, FALSE);
-      return;
-    }
+  if (self->frames->copy_to_clipboard) {
+    PhoshMonitor *monitor = phosh_shell_get_primary_monitor (phosh_shell_get_default ());
+    self->opaque = g_object_new (PHOSH_TYPE_FADER,
+                                 "monitor", monitor,
+                                 "style-class", "phosh-fader-screenshot-opaque",
+                                 "kbd-interactivity", TRUE,
+                                 NULL);
+    self->for_clipboard = g_object_ref (pixbuf);
+    self->opaque_id = g_timeout_add_seconds (1, (GSourceFunc) on_opaque_timeout, self);
+    g_source_set_name_by_id (self->opaque_id, "[phosh] screenshot opaque");
+    gtk_widget_show (GTK_WIDGET (self->opaque));
+  }
 
-    gdk_pixbuf_save_to_stream_async (pixbuf,
-                                     G_OUTPUT_STREAM (stream),
-                                     "png",
-                                     NULL,
-                                     on_save_pixbuf_ready,
-                                     g_object_ref (self),
-                                     NULL);
+  // Save to file
+  file = g_file_new_for_path (self->frames->filename);
+  stream = g_file_create (file, G_FILE_CREATE_NONE, NULL, &err);
+  if (!stream) {
+    g_warning ("Failed to save screenshot %s: %s", self->frames->filename, err->message);
+    screenshot_done (self, FALSE);
+    return;
+  }
+  gdk_pixbuf_save_to_stream_async (pixbuf,
+                                   G_OUTPUT_STREAM (stream),
+                                   "png",
+                                   NULL,
+                                   on_save_pixbuf_ready,
+                                   g_object_ref (self),
+                                   NULL);
   } else {
     PhoshMonitor *monitor = phosh_shell_get_primary_monitor (phosh_shell_get_default ());
 
@@ -706,14 +716,17 @@ phosh_screenshot_manager_do_screenshot (PhoshScreenshotManager *self,
     frames->area = g_memdup2 (area, sizeof (GdkRectangle));
 
   if (gm_str_is_null_or_empty (filename)) {
-    /* Copy to clipboard */
-    frames->filename = NULL;
+    // Save to Pictures directory and copy to clipboard
+    const char *pictures_dir = g_get_user_special_dir (G_USER_DIRECTORY_PICTURES);
+    char *timestamp = g_date_time_format (g_date_time_new_now_local (), "%Y-%m-%d-%H-%M-%S");
+    frames->filename = g_build_filename (pictures_dir, "Screenshot", timestamp, ".png", NULL);
+    g_free (timestamp);
+    frames->copy_to_clipboard = TRUE;
   } else {
     frames->filename = build_screenshot_filename (filename);
-    if (frames->filename == NULL) {
-      g_warning ("Failed to build screenshot filename");
-      return FALSE;
-    }
+    frames->copy_to_clipboard = FALSE;
+  }
+
   }
 
   self->frames = g_steal_pointer (&frames);
